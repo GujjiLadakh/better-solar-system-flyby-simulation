@@ -11,3 +11,5 @@ The parameters for the flyby (impact parameter, start distance, mass) can be def
 It will probably be better for you to remove the lines that use the logger to make output more readable.
 
 The plots and CSV files will go into their respective folders.
+
+You can alter the flyby parameters in the code as you so wish.
