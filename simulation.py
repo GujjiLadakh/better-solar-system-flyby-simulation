@@ -1,8 +1,10 @@
+# COPYRIGHT OF GUJJI LADAKH
 from astropy.coordinates import solar_system_ephemeris, get_body_barycentric_posvel
 from astropy.time import Time
 from datetime import datetime
 import astropy.units as u
 import matplotlib.pyplot as plt
+import multiprocessing as mp
 import pandas as pd
 import numpy as np
 import rebound
@@ -25,11 +27,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# VARY THE LINES BELOW TO ADJUST STELLAR FLYBY PARAMETERS
-B = 100
-START_DISTANCE = 1000
+# YOU CAN ADJUST THE FOLLOWING PARAMETERS BELOW
+B = 500
+START_DISTANCE = 5000
 VELOCITY_AT_INFINITY = 2.1
-FLYBY_MASS = 1.0
+FLYBY_MASS = 50.0
+SWEEP_MASSES = np.linspace(1, 200, 20)
+SWEEP_BS = np.linspace(100, 2000, 20)
+SWEEP_TOTAL_TIME = 10000
 
 MASSES = np.array([1.0, 3.301e23/M_s, 4.867e24/M_s, 5.972e24/M_s, 6.417e23/M_s, 1.898e27/M_s, 5.683e26/M_s, 8.618e25/M_s, 1.024e26/M_s, FLYBY_MASS])
 
@@ -89,6 +94,75 @@ def initialise_rebound_sim(positions, velocities):
 
     return sim
 
+def run_single_sweep(args):
+    flyby_mass, b = args
+    solar_system_ephemeris.set('de432s')
+    positions = np.zeros((10, 3))
+    velocities = np.zeros((10, 3))
+    for i, body in enumerate(NAMES[:-1]):
+        if body == 'sun':
+            continue
+        pos, vel = get_body_barycentric_posvel(body, TIME)
+        positions[i] = pos.xyz.to(u.AU).value
+        velocities[i] = vel.xyz.to(u.AU / u.year).value
+    positions[9] = np.array([START_DISTANCE, b, 0.0])
+    velocities[9] = np.array([-VELOCITY_AT_INFINITY, 0.0, 0.0])
+
+    masses = MASSES.copy()
+    masses[9] = flyby_mass
+
+    sim = rebound.Simulation()
+    sim.units = ('yr', 'AU', 'Msun')
+    sim.integrator = 'ias15'
+    sim.G = 4 * np.pi ** 2
+    for i in range(len(NAMES)):
+        sim.add(m=masses[i], x=positions[i, 0], y=positions[i, 1], z=positions[i, 2],
+                vx=velocities[i, 0], vy=velocities[i, 1], vz=velocities[i, 2])
+    logger.info('Simulation initialised')
+
+    planet_indices = [i for i, n in enumerate(NAMES) if n not in ('sun', 'flyby')]
+    total_ejected = 0
+    for t in range(1, SWEEP_TOTAL_TIME + 1):
+        sim.integrate(t)
+        sun = sim.particles[0]
+        sun_pos = np.array([sun.x, sun.y, sun.z])
+        sun_vel = np.array([sun.vx, sun.vy, sun.vz])
+        for i in planet_indices:
+            p = sim.particles[i]
+            rel_pos = np.array([p.x - sun_pos[0], p.y - sun_pos[1], p.z - sun_pos[2]])
+            rel_vel = np.array([p.vx - sun_vel[0], p.vy - sun_vel[1], p.vz - sun_vel[2]])
+            a, _, e, _ = calculate_orbital_elements(rel_pos, rel_vel)
+            if e >= 1.0 or a < 0:
+                total_ejected += 1
+                logger.info('Planet ejected')
+                planet_indices.remove(i)
+        if total_ejected > 1:
+            break
+    logger.info('Sweep finished')
+    return total_ejected
+
+def run_sweep():
+    logger.info(f'Starting sweep simulations with {len(SWEEP_BS) * len(SWEEP_BS)} simulations')
+    grid_args = [(m, b) for m in SWEEP_MASSES for b in SWEEP_BS]
+
+    with mp.Pool(mp.cpu_count()) as pool:
+        results = pool.map(run_single_sweep, grid_args)
+
+    ejection_grid = np.array(results).reshape(len(SWEEP_MASSES), len(SWEEP_BS))
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    im = ax.contourf(SWEEP_BS, SWEEP_MASSES, ejection_grid, levels=[0, 1, 2, 3], cmap='hot')
+    ax.contour(SWEEP_BS, SWEEP_MASSES, ejection_grid, levels=[1, 2], colors='cyan', linewidths=1, linestyles='dashed')
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label('Planets Ejected', fontsize=11)
+    ax.set_xlabel('Impact Parameter (B) / AU', fontsize=12)
+    ax.set_ylabel('Flyby Mass / Solar Masses', fontsize=12)
+    ax.set_title('Planet Ejection heatmap\nDashed Cyan = Ejection Threshold', fontsize=12)
+    timestamp = datetime.now().strftime('%H_%M')
+    plt.savefig(f'{timestamp}_sweep_heatmap.pdf', bbox_inches='tight')
+    logger.info('Sweep complete, heatmap saved')
+    logger.info('Done!')
+
 def run():
     logger.info('Running simulation...')
     fig, ax = plt.subplots(2, 2, constrained_layout=True)
@@ -102,7 +176,7 @@ def run():
         a, b, e, h = calculate_orbital_elements(positions[i], velocities[i])
         initial_orbital_elements[body] = {'a': a, 'b': b, 'e': e, 'h': h}
 
-    # YOU MAY HAVE TO ADJUST THIS IF YOU ALTER THE START DISTANCE AND VELOCITY
+    # YOU MAY HAVE TO CHANGE THIS VALUE IF YOU ALTER THE STARTING DISTANCE AND VELOCITY
     total_time = 20000
 
     earth_e = []
@@ -171,14 +245,18 @@ def run():
     df.to_csv(f'{CSV_FILE_PATH}{datetime.now().strftime('%H_%M')}_{FLYBY_MASS}_{B}.csv', index=False)
 
     x = np.arange(1, total_time + 1)
-    ax[0, 0].plot(x, earth_e); ax[0, 0].set_title('Eccentricity'); ax[0, 0].set_ylabel('e'); ax[0, 0].grid(True)
-    ax[0, 1].plot(x, earth_a); ax[0, 1].set_title('Semi-major axis'); ax[0, 1].set_ylabel('a'); ax[0, 1].grid(True)
-    ax[1, 0].plot(x, earth_b); ax[1, 0].set_title('Semi-minor axis'); ax[1, 0].set_ylabel('b'); ax[1, 0].grid(True)
-    ax[1, 1].plot(x, earth_h); ax[1, 1].set_title('Angular momentum'); ax[1, 1].set_ylabel('h'); ax[1, 1].grid(True)
+    ax[0, 0].plot(x, earth_e); ax[0, 0].set_title('Eccentricity'); ax[0, 0].set_ylabel('Eccentricity'); ax[0, 0].set_xlabel('Years'); ax[0, 0].grid(True)
+    ax[0, 1].plot(x, earth_a); ax[0, 1].set_title('Semi-major axis'); ax[0, 1].set_ylabel('Semi-major axis / AU'); ax[0, 1].set_xlabel('Years'); ax[0, 1].grid(True)
+    ax[1, 0].plot(x, earth_b); ax[1, 0].set_title('Semi-minor axis'); ax[1, 0].set_ylabel('Semi-minor axis / AU'); ax[1, 0].set_xlabel('Years'); ax[1, 0].grid(True)
+    ax[1, 1].plot(x, earth_h); ax[1, 1].set_title('Angular momentum'); ax[1, 1].set_ylabel('Angular momentum / M☉ AU² yr⁻¹'); ax[1, 1].set_xlabel('Years'); ax[1, 1].grid(True)
 
     plt.savefig(f'{PLOT_FILE_PATH}{datetime.now().strftime('%H_%M')}_{FLYBY_MASS}_{B}.pdf')
 
     logger.info('Done!')
 
 if __name__ == '__main__':
-    run()
+    choice = input('Would you like to run a single simulation or a sweep? (1/2): ')
+    if choice == '1':
+        run()
+    else:
+        run_sweep()
