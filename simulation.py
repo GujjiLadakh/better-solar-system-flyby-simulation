@@ -43,14 +43,15 @@ def initialise_planets_and_flyby():
     solar_system_ephemeris.set('de432s')
     positions = np.zeros((10, 3))
     velocities = np.zeros((10, 3))
+    sun_pos, sun_vel = get_body_barycentric_posvel('sun', TIME)
     for i, body in enumerate(NAMES[:-1]):
         if body == 'sun':
             continue
         pos, vel = get_body_barycentric_posvel(body, TIME)
         pos = pos.xyz.to(u.AU).value
         vel = vel.xyz.to(u.AU / u.year).value
-        positions[i] = pos
-        velocities[i] = vel
+        positions[i] = pos - sun_pos
+        velocities[i] = vel - sun_vel
 
     positions[9] = np.array([START_DISTANCE, B, 0.0])
     velocities[9] = np.array([-VELOCITY_AT_INFINITY, 0.0, 0.0])
@@ -173,7 +174,12 @@ def run():
     for i, body in enumerate(NAMES):
         if body == 'sun' or body == 'flyby':
             continue
-        a, b, e, h = calculate_orbital_elements(positions[i], velocities[i])
+        curr_body = sim.particles[i]
+
+        pos = np.array([curr_body.x, curr_body.y, curr_body.z])
+        vel = np.array([curr_body.vx, curr_body.vy, curr_body.vz])
+        
+        a, b, e, h = calculate_orbital_elements(pos, vel)
         initial_orbital_elements[body] = {'a': a, 'b': b, 'e': e, 'h': h}
 
     # YOU MAY HAVE TO CHANGE THIS VALUE IF YOU ALTER THE STARTING DISTANCE AND VELOCITY
